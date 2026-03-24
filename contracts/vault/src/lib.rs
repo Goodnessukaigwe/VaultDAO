@@ -78,6 +78,8 @@ fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_led
 }
 
 #[cfg(test)]
+mod test_audit;
+#[cfg(test)]
 mod test_hooks;
 #[cfg(test)]
 mod test_recurring;
@@ -2217,6 +2219,11 @@ impl VaultDAO {
     /// Get audit entry by ID
     pub fn get_audit_entry(env: Env, entry_id: u64) -> Result<AuditEntry, VaultError> {
         storage::get_audit_entry(&env, entry_id)
+    }
+
+    /// Get the total number of audit entries
+    pub fn get_audit_entry_count(env: Env) -> u64 {
+        storage::get_next_audit_id(&env)
     }
 
     /// Verify audit trail integrity
