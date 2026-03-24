@@ -80,6 +80,8 @@ fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_led
 #[cfg(test)]
 mod test_hooks;
 #[cfg(test)]
+mod test_recurring;
+#[cfg(test)]
 mod test_regressions;
 
 #[contractimpl]
