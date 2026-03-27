@@ -15,6 +15,7 @@ import {
 export function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
 
+
   // Remove X-Powered-By header
   app.disable("x-powered-by");
 
@@ -29,6 +30,35 @@ export function createApp(env: BackendEnv, runtime: BackendRuntime) {
         "max-age=31536000; includeSubDomains; preload",
       );
     }
+
+  // CORS middleware
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const origin = req.get("Origin");
+
+    const isAllowed =
+      env.corsOrigin.includes("*") || (origin && env.corsOrigin.includes(origin));
+
+    if (isAllowed && origin) {
+      res.set("Access-Control-Allow-Origin", origin);
+    } else if (env.corsOrigin.includes("*")) {
+      res.set("Access-Control-Allow-Origin", "*");
+    }
+
+    res.set(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+    );
+    res.set(
+      "Access-Control-Allow-Headers",
+      `Content-Type, Authorization, ${REQUEST_ID_HEADER}`,
+    );
+
+    if (req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+
+
     next();
   });
 
