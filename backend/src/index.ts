@@ -4,7 +4,10 @@ import { startServer } from "./server.js";
 import { createLogger } from "./shared/logging/logger.js";
 import { maskContractId } from "./shared/utils/mask.js";
 import { LifecycleManager } from "./app/lifecycle/lifecycle-manager.js";
-import { RealtimeServer, createRealtimeTopic } from "./modules/realtime/index.js";
+import {
+  RealtimeServer,
+  createRealtimeTopic,
+} from "./modules/realtime/index.js";
 import { InMemoryNotificationQueue } from "./modules/notifications/index.js";
 import { ScheduledJobRunner } from "./modules/jobs/index.js";
 import { randomUUID } from "node:crypto";
@@ -65,7 +68,7 @@ realtimeServer.start();
 jobRunner.start();
 
 // Start server and integrate with lifecycle management
-const server = startServer(env);
+const { server } = startServer(env);
 const lifecycle = new LifecycleManager(server);
 lifecycle.onShutdown({
   name: "scheduled-job-runner",
