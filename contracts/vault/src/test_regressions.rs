@@ -19,6 +19,7 @@ fn init_config(
         signers,
         threshold,
         quorum: 0,
+        quorum_percentage: 0,
         default_voting_deadline: 0,
         spending_limit: 10_000,
         daily_limit: 100_000,

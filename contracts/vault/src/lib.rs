@@ -148,7 +148,7 @@ impl VaultDAO {
             signers: config.signers.clone(),
             threshold: config.threshold,
             quorum: config.quorum,
-            quorum_percentage: 0,
+            quorum_percentage: config.quorum_percentage,
             spending_limit: config.spending_limit,
             daily_limit: config.daily_limit,
             weekly_limit: config.weekly_limit,
@@ -869,13 +869,14 @@ impl VaultDAO {
         let approval_count = proposal.approvals.len();
         let quorum_votes = approval_count + proposal.abstentions.len();
         let previous_quorum_votes = quorum_votes.saturating_sub(1);
-        let was_quorum_reached = config.quorum == 0 || previous_quorum_votes >= config.quorum;
+        let required_quorum = Self::effective_quorum(&config);
+        let was_quorum_reached = required_quorum == 0 || previous_quorum_votes >= required_quorum;
 
         // Check if threshold met AND quorum satisfied
         let threshold_reached = Self::is_threshold_reached(&env, &config, &proposal);
-        let quorum_reached = config.quorum == 0 || quorum_votes >= config.quorum;
-        if config.quorum > 0 && !was_quorum_reached && quorum_reached {
-            events::emit_quorum_reached(&env, proposal_id, quorum_votes, config.quorum);
+        let quorum_reached = required_quorum == 0 || quorum_votes >= required_quorum;
+        if required_quorum > 0 && !was_quorum_reached && quorum_reached {
+            events::emit_quorum_reached(&env, proposal_id, quorum_votes, required_quorum);
         }
 
         if threshold_reached && quorum_reached {
@@ -1004,13 +1005,14 @@ impl VaultDAO {
         let abstention_count = proposal.abstentions.len();
         let quorum_votes = approval_count + abstention_count;
         let previous_quorum_votes = quorum_votes.saturating_sub(1);
-        let was_quorum_reached = config.quorum == 0 || previous_quorum_votes >= config.quorum;
+        let required_quorum = Self::effective_quorum(&config);
+        let was_quorum_reached = required_quorum == 0 || previous_quorum_votes >= required_quorum;
 
         // Check if threshold met AND quorum satisfied
         let threshold_reached = Self::is_threshold_reached(&env, &config, &proposal);
-        let quorum_reached = config.quorum == 0 || quorum_votes >= config.quorum;
-        if config.quorum > 0 && !was_quorum_reached && quorum_reached {
-            events::emit_quorum_reached(&env, proposal_id, quorum_votes, config.quorum);
+        let quorum_reached = required_quorum == 0 || quorum_votes >= required_quorum;
+        if required_quorum > 0 && !was_quorum_reached && quorum_reached {
+            events::emit_quorum_reached(&env, proposal_id, quorum_votes, required_quorum);
         }
 
         if threshold_reached && quorum_reached {
@@ -3418,6 +3420,18 @@ impl VaultDAO {
             VotingStrategy::Quadratic => Ok(()),
             VotingStrategy::Conviction => Ok(()),
         }
+    }
+
+    /// Returns the effective quorum: absolute takes precedence; falls back to percentage-derived.
+    fn effective_quorum(config: &Config) -> u32 {
+        if config.quorum > 0 {
+            return config.quorum;
+        }
+        if config.quorum_percentage > 0 {
+            let n = config.signers.len();
+            return (n * config.quorum_percentage).div_ceil(100);
+        }
+        0
     }
 
     fn is_threshold_reached(env: &Env, config: &Config, proposal: &Proposal) -> bool {
