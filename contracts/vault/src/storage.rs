@@ -23,11 +23,12 @@ use soroban_sdk::{contracttype, Address, Env, String, Vec};
 use crate::errors::VaultError;
 use crate::types::{
     AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, DelegatedPermission,
-    DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot, FeeStructure, FundingRound,
-    FundingRoundConfig, GasConfig, InsuranceConfig, ListMode, NotificationPreferences,
-    PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate, RecoveryProposal, Reputation,
-    RetryState, Role, RoleAssignment, StakeRecord, StakingConfig, Subscription, SwapProposal,
-    SwapResult, TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
+    Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot,
+    FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
+    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate,
+    RecoveryProposal, Reputation, RetryState, Role, RoleAssignment, StakeRecord, StakingConfig,
+    Subscription, SwapProposal, SwapResult, TimeWeightedConfig, TokenLock, VaultMetrics,
+    VelocityConfig, VotingStrategy,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -98,6 +99,14 @@ pub enum DataKey {
     ExecutionSnapshot(u64),
     /// Execution fee estimate
     ExecutionFeeEstimate(u64),
+    /// Voting power delegation (delegator) -> Delegation
+    Delegation(Address),
+    /// Delegation history for an address -> Vec<DelegationHistory>
+    DelegationHistory(Address),
+    /// Next delegation history ID counter -> u64
+    NextDelegationId,
+    /// Reverse delegation index: delegate -> Vec<delegators>
+    DelegatorsFor(Address),
 }
 
 /// Feature-specific storage keys (split to avoid enum size limits)
@@ -203,8 +212,6 @@ pub enum FeatureKey {
     Subscription(u64),
     /// Next subscription ID counter -> u64
     NextSubscriptionId,
-    // Stream payment storage (nested with StreamKey)
-    // Stream(StreamKey), // Feature incomplete
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -1831,13 +1838,91 @@ pub fn add_user_volume(env: &Env, user: &Address, token: &Address, amount: i128)
 // Delegation (compatibility helpers)
 // ============================================================================
 
-#[allow(dead_code)]
-pub fn get_delegation(_env: &Env, _delegator: &Address) -> Option<crate::types::Delegation> {
-    None
+pub fn get_delegation(env: &Env, delegator: &Address) -> Option<Delegation> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Delegation(delegator.clone()))
 }
 
-#[allow(dead_code)]
-pub fn set_delegation(_env: &Env, _delegation: &crate::types::Delegation) {}
+pub fn set_delegation(env: &Env, delegation: &Delegation) {
+    // If there's an existing delegation, remove from old reverse index
+    if let Some(old) = get_delegation(env, &delegation.delegator) {
+        remove_from_delegators_index(env, &old.delegate, &delegation.delegator);
+    }
+
+    let key = DataKey::Delegation(delegation.delegator.clone());
+    env.storage().persistent().set(&key, delegation);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+
+    // Update reverse index
+    add_to_delegators_index(env, &delegation.delegate, &delegation.delegator);
+}
+
+pub fn remove_delegation(env: &Env, delegator: &Address) {
+    if let Some(old) = get_delegation(env, delegator) {
+        remove_from_delegators_index(env, &old.delegate, delegator);
+    }
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Delegation(delegator.clone()));
+}
+
+fn add_to_delegators_index(env: &Env, delegate: &Address, delegator: &Address) {
+    let mut delegators = get_delegators_for(env, delegate);
+    if !delegators.contains(delegator) {
+        delegators.push_back(delegator.clone());
+        let key = DataKey::DelegatorsFor(delegate.clone());
+        env.storage().persistent().set(&key, &delegators);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+    }
+}
+
+fn remove_from_delegators_index(env: &Env, delegate: &Address, delegator: &Address) {
+    let mut delegators = get_delegators_for(env, delegate);
+    let mut new_delegators = Vec::new(env);
+    for d in delegators.iter() {
+        if d != *delegator {
+            new_delegators.push_back(d);
+        }
+    }
+    let key = DataKey::DelegatorsFor(delegate.clone());
+    env.storage().persistent().set(&key, &new_delegators);
+}
+
+pub fn get_delegators_for(env: &Env, delegate: &Address) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::DelegatorsFor(delegate.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_delegation_history(env: &Env, user: &Address) -> Vec<DelegationHistory> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::DelegationHistory(user.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_delegation_history(env: &Env, history: &DelegationHistory) {
+    let mut entries = get_delegation_history(env, &history.delegator);
+    entries.push_back(history.clone());
+    let key = DataKey::DelegationHistory(history.delegator.clone());
+    env.storage().persistent().set(&key, &entries);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn increment_delegation_id(env: &Env) -> u64 {
+    let key = DataKey::NextDelegationId;
+    let id: u64 = env.storage().instance().get(&key).unwrap_or(1);
+    env.storage().instance().set(&key, &(id + 1));
+    id
+}
 
 // ============================================================================
 // Cross-Vault
