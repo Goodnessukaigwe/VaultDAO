@@ -12728,3 +12728,75 @@ fn test_batch_below_threshold_executes_immediately() {
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(proposal.status, ProposalStatus::Executed);
 }
+
+#[test]
+fn test_insurance_slash_on_voting_deadline_rejection() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_addr = sac.address();
+    StellarAssetClient::new(&env, &token_addr).mint(&proposer, &1000);
+    StellarAssetClient::new(&env, &token_addr).mint(&contract_id, &5000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    let config = default_init_config(&env, signers, 2);
+    let config = InitConfig {
+        // voting deadline of 50 ledgers
+        default_voting_deadline: 50,
+        ..config
+    };
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    // 50% slash on rejection
+    client.set_insurance_config(
+        &admin,
+        &InsuranceConfig {
+            enabled: true,
+            min_amount: 0,
+            min_insurance_bps: 0,
+            slash_percentage: 50,
+        },
+    );
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+    // Propose with 100 tokens insurance
+    let proposal_id = client.propose_transfer(
+        &proposer,
+        &recipient,
+        &token_addr,
+        &100,
+        &Symbol::new(&env, "test"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &100,
+    );
+    // proposer locked 100 insurance tokens
+    assert_eq!(token_client.balance(&proposer), 900);
+
+    // Advance past the voting deadline
+    env.ledger().set_sequence_number(100);
+
+    // Trigger deadline rejection via approve_proposal
+    client.approve_proposal(&admin, &proposal_id);
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Rejected);
+
+    // 50% of 100 = 50 slashed to pool, 50 returned to proposer
+    assert_eq!(token_client.balance(&proposer), 950); // 900 + 50 returned
+    assert_eq!(client.get_insurance_pool(&token_addr), 50);
+}
