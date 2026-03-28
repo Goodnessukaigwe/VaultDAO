@@ -3428,7 +3428,7 @@ impl VaultDAO {
     }
 
     /// Calculate effective threshold based on the configured ThresholdStrategy.
-    fn calculate_threshold(config: &Config, amount: &i128) -> u32 {
+    fn calculate_threshold(env: &Env, config: &Config, amount: &i128, created_at: u64) -> u32 {
         match &config.threshold_strategy {
             ThresholdStrategy::Fixed => config.threshold,
             ThresholdStrategy::Percentage(pct) => {
@@ -3450,8 +3450,12 @@ impl VaultDAO {
                 threshold
             }
             ThresholdStrategy::TimeBased(tb) => {
-                // Simplified: use initial threshold (reduction checked at execution time)
-                tb.initial_threshold
+                let current_ledger = env.ledger().sequence() as u64;
+                if current_ledger >= created_at + tb.reduction_delay {
+                    tb.reduced_threshold
+                } else {
+                    tb.initial_threshold
+                }
             }
         }
     }
@@ -3496,18 +3500,22 @@ impl VaultDAO {
         let strategy = storage::get_voting_strategy(env);
         match strategy {
             VotingStrategy::Simple => {
-                proposal.approvals.len() >= Self::calculate_threshold(config, &proposal.amount)
+                proposal.approvals.len()
+                    >= Self::calculate_threshold(env, config, &proposal.amount, proposal.created_at)
             }
             VotingStrategy::Weighted => {
-                let required = Self::calculate_threshold(config, &proposal.amount);
+                let required =
+                    Self::calculate_threshold(env, config, &proposal.amount, proposal.created_at);
                 proposal.approvals.len() >= required
             }
             VotingStrategy::Quadratic => {
-                let required = Self::calculate_threshold(config, &proposal.amount);
+                let required =
+                    Self::calculate_threshold(env, config, &proposal.amount, proposal.created_at);
                 proposal.approvals.len() >= required
             }
             VotingStrategy::Conviction => {
-                let required = Self::calculate_threshold(config, &proposal.amount);
+                let required =
+                    Self::calculate_threshold(env, config, &proposal.amount, proposal.created_at);
                 proposal.approvals.len() >= required
             }
         }
