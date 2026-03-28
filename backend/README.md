@@ -181,25 +181,17 @@ All public endpoints are rate-limited to 100 requests per minute per IP. Return 
 
 ## 🚀 Get Started
 
-See [ROADMAP.md](docs/ROADMAP.md) for contributor tasks.
+See the [detailed roadmap](docs/ROADMAP.md) for prioritized tasks.
 
 ```
+# Quickstart for new contributors
 pnpm install
 pnpm test
-# Pick Foundation task
-```
-
-## 📦 Deployment
-
-See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for staging/production.
-
-```
-docker build -t vaultdao-backend .
-docker run --env-file .env.prod -p 8787:8787 vaultdao-backend
+# Pick a Foundation task from ROADMAP.md
 ```
 
 ## Current Endpoints
 
-- `GET /health` (liveness)
-- `GET /ready` (readiness)
-- `GET /api/v1/status` (sync status)
+- `GET /health`
+- `GET /ready` 
+- `GET /api/v1/status`

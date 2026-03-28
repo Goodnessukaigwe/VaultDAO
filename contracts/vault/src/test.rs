@@ -12014,3 +12014,717 @@ fn test_quorum_percentage_enforcement() {
         ProposalStatus::Approved
     );
 }
+
+// ============================================================================
+// TASK 1: Bug Condition Exploration Test
+//
+// Property 1: Fault Condition — Batch Proposals Respect Timelock Threshold
+//
+// These tests encode the EXPECTED behavior. They FAILED on unfixed code
+// (unlock_ledger was 0 instead of current_ledger + timelock_delay).
+// After the fix they MUST PASS.
+//
+// Validates: Requirements 2.1
+// ============================================================================
+
+/// **Validates: Requirements 2.1**
+///
+/// Property 1: For all batch transfers where `amount >= timelock_threshold`,
+/// `batch_propose_transfers([{amount}]).unlock_ledger == current_ledger + timelock_delay`.
+///
+/// Tests four cases:
+///   1. Single-item batch with amount == timelock_threshold
+///   2. Single-item batch with amount > timelock_threshold
+///   3. Mixed batch (one above, one below threshold)
+///   4. All-above batch (multiple transfers all above threshold)
+///
+/// EXPECTED OUTCOME (post-fix): PASSES — unlock_ledger is correctly set.
+#[test]
+fn pbt_fault_condition_batch_above_threshold_unlock_ledger_is_delayed() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // preservation_setup sets ledger sequence to 100, timelock_threshold=500, timelock_delay=100
+    let timelock_threshold: i128 = 500;
+    let timelock_delay: u64 = 100;
+    let current_ledger: u64 = 100;
+    let expected_unlock = current_ledger + timelock_delay;
+
+    // Case 1: Single-item batch with amount == timelock_threshold
+    {
+        let mut transfers = Vec::new(&env);
+        transfers.push_back(TransferDetails {
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount: timelock_threshold,
+        });
+        let proposal_ids = client.batch_propose_transfers(
+            &treasurer,
+            &transfers,
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+        let proposal = client.get_proposal(&proposal_ids.get(0).unwrap());
+        assert_eq!(
+            proposal.unlock_ledger, expected_unlock,
+            "Case 1 (amount == threshold): expected unlock_ledger = {}, got {}",
+            expected_unlock, proposal.unlock_ledger
+        );
+    }
+
+    // Case 2: Single-item batch with amount > timelock_threshold
+    {
+        let mut transfers = Vec::new(&env);
+        transfers.push_back(TransferDetails {
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount: timelock_threshold + 100,
+        });
+        let proposal_ids = client.batch_propose_transfers(
+            &treasurer,
+            &transfers,
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+        let proposal = client.get_proposal(&proposal_ids.get(0).unwrap());
+        assert_eq!(
+            proposal.unlock_ledger, expected_unlock,
+            "Case 2 (amount > threshold): expected unlock_ledger = {}, got {}",
+            expected_unlock, proposal.unlock_ledger
+        );
+    }
+
+    // Case 3: Mixed batch — one above threshold, one below
+    {
+        let mut transfers = Vec::new(&env);
+        transfers.push_back(TransferDetails {
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount: timelock_threshold + 50, // above threshold
+        });
+        transfers.push_back(TransferDetails {
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount: timelock_threshold - 1, // below threshold
+        });
+        let proposal_ids = client.batch_propose_transfers(
+            &treasurer,
+            &transfers,
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+        let above_proposal = client.get_proposal(&proposal_ids.get(0).unwrap());
+        let below_proposal = client.get_proposal(&proposal_ids.get(1).unwrap());
+        assert_eq!(
+            above_proposal.unlock_ledger, expected_unlock,
+            "Case 3 (above-threshold in mixed batch): expected unlock_ledger = {}, got {}",
+            expected_unlock, above_proposal.unlock_ledger
+        );
+        assert_eq!(
+            below_proposal.unlock_ledger, 0,
+            "Case 3 (below-threshold in mixed batch): expected unlock_ledger = 0, got {}",
+            below_proposal.unlock_ledger
+        );
+    }
+
+    // Case 4: All-above batch — every transfer above threshold
+    {
+        let above_amounts: &[i128] = &[
+            timelock_threshold,
+            timelock_threshold + 1,
+            timelock_threshold + 50,
+        ];
+        let mut transfers = Vec::new(&env);
+        for &amount in above_amounts {
+            transfers.push_back(TransferDetails {
+                recipient: recipient.clone(),
+                token: token.clone(),
+                amount,
+            });
+        }
+        let proposal_ids = client.batch_propose_transfers(
+            &treasurer,
+            &transfers,
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+        for idx in 0..above_amounts.len() as u32 {
+            let proposal = client.get_proposal(&proposal_ids.get(idx).unwrap());
+            assert_eq!(
+                proposal.unlock_ledger, expected_unlock,
+                "Case 4 (all-above batch, idx {}): expected unlock_ledger = {}, got {}",
+                idx, expected_unlock, proposal.unlock_ledger
+            );
+        }
+    }
+}
+
+// ============================================================================
+// TASK 2: Preservation Property Tests (BEFORE fix)
+//
+// These tests establish the baseline behavior we want to PRESERVE after the fix.
+// They MUST PASS on unfixed code.
+//
+// Property 2: Preservation — Below-Threshold Batch Transfers Remain Unlocked
+// Property 3: Preservation — Single-Proposal Path Is Unchanged
+//
+// Validates: Requirements 2.2, 3.1, 3.2, 3.4
+// ============================================================================
+
+/// Helper: set up a minimal vault environment for preservation tests.
+/// Returns (env, client, admin, treasurer, token).
+fn preservation_setup() -> (Env, VaultDAOClient<'static>, Address, Address, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(100);
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasurer = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1_000_000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(treasurer.clone());
+
+    let config = InitConfig {
+        signers,
+        threshold: 1,
+        quorum: 0,
+        quorum_percentage: 0,
+        spending_limit: 1_000_000,
+        daily_limit: 10_000_000,
+        weekly_limit: 50_000_000,
+        timelock_threshold: 500,
+        timelock_delay: 100,
+        velocity_limit: VelocityConfig {
+            limit: 1000,
+            window: 3600,
+        },
+        threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
+        retry_config: RetryConfig {
+            enabled: false,
+            max_retries: 0,
+            initial_backoff_ledgers: 0,
+        },
+        recovery_config: crate::types::RecoveryConfig::default(&env),
+        staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: soroban_sdk::Vec::new(&env),
+        post_execution_hooks: soroban_sdk::Vec::new(&env),
+    };
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &treasurer, &Role::Treasurer);
+
+    (env, client, admin, treasurer, token)
+}
+
+/// **Validates: Requirements 2.2, 3.4**
+///
+/// Property 2a: For all `amount` in `[1, timelock_threshold - 1]`,
+/// `batch_propose_transfers([{amount}]).unlock_ledger == 0`.
+///
+/// Iterates over a representative set of below-threshold amounts and asserts
+/// that each batch proposal has `unlock_ledger = 0` (no timelock applied).
+/// This MUST PASS on unfixed code — it confirms the below-threshold batch path
+/// is already correct and must be preserved by the fix.
+#[test]
+fn pbt_preservation_batch_below_threshold_unlock_ledger_is_zero() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold = 500; test amounts in [1, 499]
+    let timelock_threshold: i128 = 500;
+    let test_amounts: &[i128] = &[
+        1,
+        2,
+        10,
+        50,
+        100,
+        249,
+        250,
+        251,
+        timelock_threshold - 2,
+        timelock_threshold - 1,
+    ];
+
+    for &amount in test_amounts {
+        let mut transfers = Vec::new(&env);
+        transfers.push_back(TransferDetails {
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+        });
+
+        let proposal_ids = client.batch_propose_transfers(
+            &treasurer,
+            &transfers,
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+
+        let proposal = client.get_proposal(&proposal_ids.get(0).unwrap());
+        assert_eq!(
+            proposal.unlock_ledger, 0,
+            "Expected unlock_ledger = 0 for below-threshold batch amount {}, got {}",
+            amount, proposal.unlock_ledger
+        );
+    }
+}
+
+/// **Validates: Requirements 3.2, 3.4**
+///
+/// Property 3a: For all `amount` in `[1, timelock_threshold - 1]`,
+/// `propose_transfer_internal({amount}).unlock_ledger == 0`.
+///
+/// Iterates over a representative set of below-threshold amounts and asserts
+/// that each single proposal has `unlock_ledger = 0`.
+/// This MUST PASS on unfixed code — it confirms the single-proposal path
+/// correctly handles below-threshold amounts.
+#[test]
+fn pbt_preservation_single_below_threshold_unlock_ledger_is_zero() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold = 500; test amounts in [1, 499]
+    let timelock_threshold: i128 = 500;
+    let test_amounts: &[i128] = &[
+        1,
+        2,
+        10,
+        50,
+        100,
+        249,
+        250,
+        251,
+        timelock_threshold - 2,
+        timelock_threshold - 1,
+    ];
+
+    for &amount in test_amounts {
+        let proposal_id = client.propose_transfer(
+            &treasurer,
+            &recipient,
+            &token,
+            &amount,
+            &Symbol::new(&env, "prsv"),
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(
+            proposal.unlock_ledger, 0,
+            "Expected unlock_ledger = 0 for below-threshold single amount {}, got {}",
+            amount, proposal.unlock_ledger
+        );
+    }
+}
+
+/// **Validates: Requirements 3.1**
+///
+/// Property 3b: For all `amount >= timelock_threshold`,
+/// `propose_transfer_internal({amount}).unlock_ledger == current_ledger + timelock_delay`.
+///
+/// Iterates over a representative set of at-or-above-threshold amounts and asserts
+/// that each single proposal has `unlock_ledger = current_ledger + timelock_delay`.
+/// This MUST PASS on unfixed code — it confirms the single-proposal path
+/// correctly applies the timelock for at/above-threshold amounts.
+#[test]
+fn pbt_preservation_single_at_or_above_threshold_unlock_ledger_is_delayed() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold = 500, timelock_delay = 100, current_ledger = 100
+    let timelock_threshold: i128 = 500;
+    let timelock_delay: u64 = 100;
+    let current_ledger: u64 = 100; // set by preservation_setup
+    let expected_unlock = current_ledger + timelock_delay;
+
+    let test_amounts: &[i128] = &[
+        timelock_threshold,
+        timelock_threshold + 1,
+        timelock_threshold + 50,
+        timelock_threshold + 100,
+        timelock_threshold + 499,
+        timelock_threshold * 2,
+        timelock_threshold * 10,
+    ];
+
+    for &amount in test_amounts {
+        let proposal_id = client.propose_transfer(
+            &treasurer,
+            &recipient,
+            &token,
+            &amount,
+            &Symbol::new(&env, "prsv"),
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(
+            proposal.unlock_ledger, expected_unlock,
+            "Expected unlock_ledger = {} for at/above-threshold single amount {}, got {}",
+            expected_unlock, amount, proposal.unlock_ledger
+        );
+    }
+}
+
+// ============================================================================
+// TASK 3.4: Unit Tests for Boundary Conditions
+//
+// Validates: Requirements 2.1, 2.2, 3.1, 3.2
+//
+// Config: timelock_threshold=500, timelock_delay=100, ledger sequence=100
+// => expected_unlock = 100 + 100 = 200
+// ============================================================================
+
+/// batch_propose_transfers with amount == timelock_threshold should set
+/// unlock_ledger == current_ledger + timelock_delay.
+///
+/// Validates: Requirements 2.1
+#[test]
+fn test_batch_propose_at_threshold_has_timelock() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold=500, timelock_delay=100, current_ledger=100
+    let timelock_threshold: i128 = 500;
+    let expected_unlock: u64 = 200; // 100 + 100
+
+    let mut transfers = Vec::new(&env);
+    transfers.push_back(TransferDetails {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: timelock_threshold, // exactly at threshold
+    });
+
+    let proposal_ids = client.batch_propose_transfers(
+        &treasurer,
+        &transfers,
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let proposal = client.get_proposal(&proposal_ids.get(0).unwrap());
+    assert_eq!(
+        proposal.unlock_ledger, expected_unlock,
+        "Expected unlock_ledger = {} for amount == threshold, got {}",
+        expected_unlock, proposal.unlock_ledger
+    );
+}
+
+/// batch_propose_transfers with amount == timelock_threshold - 1 should set
+/// unlock_ledger == 0 (no timelock).
+///
+/// Validates: Requirements 2.2
+#[test]
+fn test_batch_propose_below_threshold_no_timelock() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold=500; amount just below threshold
+    let timelock_threshold: i128 = 500;
+
+    let mut transfers = Vec::new(&env);
+    transfers.push_back(TransferDetails {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: timelock_threshold - 1, // just below threshold
+    });
+
+    let proposal_ids = client.batch_propose_transfers(
+        &treasurer,
+        &transfers,
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let proposal = client.get_proposal(&proposal_ids.get(0).unwrap());
+    assert_eq!(
+        proposal.unlock_ledger, 0,
+        "Expected unlock_ledger = 0 for amount below threshold, got {}",
+        proposal.unlock_ledger
+    );
+}
+
+/// Mixed batch: one transfer above threshold, one below.
+/// Each proposal's unlock_ledger must be set independently and correctly.
+///
+/// Validates: Requirements 2.1, 2.2
+#[test]
+fn test_batch_propose_mixed_per_proposal_unlock_ledger() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold=500, timelock_delay=100, current_ledger=100
+    let timelock_threshold: i128 = 500;
+    let expected_unlock: u64 = 200; // 100 + 100
+
+    let mut transfers = Vec::new(&env);
+    // First transfer: above threshold — should get timelock
+    transfers.push_back(TransferDetails {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: timelock_threshold + 100,
+    });
+    // Second transfer: below threshold — should have no timelock
+    transfers.push_back(TransferDetails {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: timelock_threshold - 1,
+    });
+
+    let proposal_ids = client.batch_propose_transfers(
+        &treasurer,
+        &transfers,
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let above_proposal = client.get_proposal(&proposal_ids.get(0).unwrap());
+    let below_proposal = client.get_proposal(&proposal_ids.get(1).unwrap());
+
+    assert_eq!(
+        above_proposal.unlock_ledger, expected_unlock,
+        "Above-threshold proposal: expected unlock_ledger = {}, got {}",
+        expected_unlock, above_proposal.unlock_ledger
+    );
+    assert_eq!(
+        below_proposal.unlock_ledger, 0,
+        "Below-threshold proposal: expected unlock_ledger = 0, got {}",
+        below_proposal.unlock_ledger
+    );
+}
+
+/// propose_transfer with amount == timelock_threshold should set
+/// unlock_ledger == current_ledger + timelock_delay (behavior unchanged).
+///
+/// Validates: Requirements 3.1
+#[test]
+fn test_single_propose_at_threshold_unchanged() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold=500, timelock_delay=100, current_ledger=100
+    let timelock_threshold: i128 = 500;
+    let expected_unlock: u64 = 200; // 100 + 100
+
+    let proposal_id = client.propose_transfer(
+        &treasurer,
+        &recipient,
+        &token,
+        &timelock_threshold, // exactly at threshold
+        &Symbol::new(&env, "test"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(
+        proposal.unlock_ledger, expected_unlock,
+        "Single propose at threshold: expected unlock_ledger = {}, got {}",
+        expected_unlock, proposal.unlock_ledger
+    );
+}
+
+/// propose_transfer with amount == timelock_threshold - 1 should set
+/// unlock_ledger == 0 (behavior unchanged).
+///
+/// Validates: Requirements 3.2
+#[test]
+fn test_single_propose_below_threshold_unchanged() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    let recipient = Address::generate(&env);
+
+    // timelock_threshold=500; amount just below threshold
+    let timelock_threshold: i128 = 500;
+
+    let proposal_id = client.propose_transfer(
+        &treasurer,
+        &recipient,
+        &token,
+        &(timelock_threshold - 1), // just below threshold
+        &Symbol::new(&env, "test"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(
+        proposal.unlock_ledger, 0,
+        "Single propose below threshold: expected unlock_ledger = 0, got {}",
+        proposal.unlock_ledger
+    );
+}
+
+// ============================================================================
+// Task 3.5 — Integration tests: execution blocking for batch timelock
+// ============================================================================
+
+/// Batch proposal with amount >= timelock_threshold is blocked from execution
+/// before unlock_ledger is reached.
+///
+/// Validates: Requirements 3.3
+#[test]
+fn test_batch_timelock_blocks_execution_before_unlock() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    // preservation_setup: current_ledger=100, timelock_threshold=500, timelock_delay=100
+    // => unlock_ledger = 200 for amounts >= 500
+
+    let recipient = Address::generate(&env);
+    let mut transfers = Vec::new(&env);
+    transfers.push_back(TransferDetails {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: 600, // above threshold
+    });
+
+    let proposal_ids = client.batch_propose_transfers(
+        &treasurer,
+        &transfers,
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    let proposal_id = proposal_ids.get(0).unwrap();
+
+    // Approve (threshold=1, so one approval suffices)
+    client.approve_proposal(&treasurer, &proposal_id);
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Approved);
+    assert_eq!(proposal.unlock_ledger, 200); // 100 + 100
+
+    // Attempt execution at ledger 100 — still locked
+    let res = client.try_execute_proposal(&treasurer, &proposal_id);
+    assert_eq!(
+        res.err(),
+        Some(Ok(VaultError::TimelockNotExpired)),
+        "Expected TimelockNotExpired before unlock_ledger is reached"
+    );
+}
+
+/// Batch proposal with amount >= timelock_threshold executes successfully
+/// after the ledger advances past unlock_ledger.
+///
+/// Validates: Requirements 3.3
+#[test]
+fn test_batch_timelock_executes_after_unlock() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    // preservation_setup: current_ledger=100, timelock_threshold=500, timelock_delay=100
+    // => unlock_ledger = 200
+
+    let recipient = Address::generate(&env);
+    let mut transfers = Vec::new(&env);
+    transfers.push_back(TransferDetails {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: 600, // above threshold
+    });
+
+    let proposal_ids = client.batch_propose_transfers(
+        &treasurer,
+        &transfers,
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    let proposal_id = proposal_ids.get(0).unwrap();
+
+    client.approve_proposal(&treasurer, &proposal_id);
+
+    // Advance ledger past unlock_ledger (200)
+    env.ledger().set_sequence_number(201);
+
+    // Execution should now succeed
+    let res = client.try_execute_proposal(&treasurer, &proposal_id);
+    assert!(
+        res.is_ok(),
+        "Expected execution to succeed after unlock_ledger is passed, got: {:?}",
+        res.err()
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}
+
+/// Batch proposal with all amounts below timelock_threshold executes immediately
+/// after approval — no timelock delay required.
+///
+/// Validates: Requirements 3.4 (regression check)
+#[test]
+fn test_batch_below_threshold_executes_immediately() {
+    let (env, client, _admin, treasurer, token) = preservation_setup();
+    // preservation_setup: current_ledger=100, timelock_threshold=500
+
+    let recipient = Address::generate(&env);
+    let mut transfers = Vec::new(&env);
+    transfers.push_back(TransferDetails {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: 499, // below threshold
+    });
+
+    let proposal_ids = client.batch_propose_transfers(
+        &treasurer,
+        &transfers,
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    let proposal_id = proposal_ids.get(0).unwrap();
+
+    client.approve_proposal(&treasurer, &proposal_id);
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(
+        proposal.unlock_ledger, 0,
+        "Below-threshold proposal should have unlock_ledger = 0"
+    );
+
+    // Execute immediately at current ledger (100) — no timelock
+    let res = client.try_execute_proposal(&treasurer, &proposal_id);
+    assert!(
+        res.is_ok(),
+        "Expected immediate execution for below-threshold batch proposal, got: {:?}",
+        res.err()
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}
