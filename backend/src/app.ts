@@ -14,6 +14,7 @@ import {
   REQUEST_ID_HEADER,
   generateRequestId,
 } from "./shared/http/requestId.js";
+import { createRequestLogger } from "./shared/http/requestLogger.js";
 
 export function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
@@ -94,6 +95,9 @@ export function createApp(env: BackendEnv, runtime: BackendRuntime) {
     maxRequests: 100, // 100 requests per minute
   });
   app.use(rateLimiter);
+
+  // Request logging middleware (after request ID so requestId is available)
+  app.use(createRequestLogger());
 
   app.use(express.json({ limit: env.requestBodyLimit }));
 
