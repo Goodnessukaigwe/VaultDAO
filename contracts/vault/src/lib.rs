@@ -2753,6 +2753,43 @@ impl VaultDAO {
         Ok(true)
     }
 
+    /// Walk the full audit trail from entry 1 to the latest entry and verify
+    /// each hash links correctly to the previous entry.
+    ///
+    /// Returns `Ok(None)` when the chain is intact, or `Ok(Some(id))` with the
+    /// ID of the first entry whose hash does not match.  Callable by any
+    /// address (read-only, no `require_auth`).
+    pub fn verify_audit_trail_full(env: Env) -> Result<Option<u64>, VaultError> {
+        let count = storage::get_next_audit_id(&env);
+        // next_audit_id starts at 1 and is incremented before use, so the
+        // highest written ID is count - 1.  If nothing has been written yet,
+        // return intact immediately.
+        if count <= 1 {
+            return Ok(None);
+        }
+        for id in 1..count {
+            let entry = storage::get_audit_entry(&env, id)?;
+            let computed = storage::compute_audit_hash(
+                &env,
+                &entry.action,
+                &entry.actor,
+                entry.target,
+                entry.timestamp,
+                entry.prev_hash,
+            );
+            if computed != entry.hash {
+                return Ok(Some(id));
+            }
+            if id > 1 {
+                let prev = storage::get_audit_entry(&env, id - 1)?;
+                if entry.prev_hash != prev.hash {
+                    return Ok(Some(id));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     // ========================================================================
     // Batch Execution
     // ========================================================================
