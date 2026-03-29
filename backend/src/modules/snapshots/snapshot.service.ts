@@ -22,6 +22,10 @@ import type {
 } from "./types.js";
 import { Role } from "./types.js";
 import { SnapshotNormalizer } from "./normalizer.js";
+import { EventNormalizer } from "../events/normalizers/index.js";
+import type { SorobanRpcClient } from "../../shared/rpc/soroban-rpc.client.js";
+
+const REBUILD_BATCH_SIZE = 200;
 
 /**
  * SnapshotService
@@ -30,7 +34,10 @@ import { SnapshotNormalizer } from "./normalizer.js";
  * Maintains current-state snapshots for fast queries.
  */
 export class SnapshotService {
-  constructor(private readonly adapter: SnapshotStorageAdapter) {}
+  constructor(
+    private readonly adapter: SnapshotStorageAdapter,
+    private readonly rpc?: SorobanRpcClient,
+  ) {}
 
   /**
    * Process a single normalized event and update snapshot.
@@ -197,6 +204,83 @@ export class SnapshotService {
         error: String(error),
       };
     }
+  }
+
+  /**
+   * Rebuild snapshot by fetching events directly from the Soroban RPC.
+   * Processes events in batches of 200 to avoid memory spikes.
+   * No-op if no RPC client was injected.
+   */
+  async rebuildFromRpc(
+    contractId: string,
+    startLedger: number,
+    endLedger: number,
+  ): Promise<SnapshotUpdateResult> {
+    if (!this.rpc) {
+      console.warn("[snapshot-service] rebuildFromRpc called but no RPC client is configured — skipping");
+      return {
+        success: true,
+        signersUpdated: 0,
+        rolesUpdated: 0,
+        eventsProcessed: 0,
+        lastProcessedLedger: 0,
+      };
+    }
+
+    await this.adapter.clearSnapshot(contractId);
+
+    let totalSignersUpdated = 0;
+    let totalRolesUpdated = 0;
+    let totalEventsProcessed = 0;
+    let lastProcessedLedger = 0;
+    const errors: string[] = [];
+
+    let currentLedger = startLedger;
+
+    while (currentLedger <= endLedger) {
+      const batchEnd = Math.min(currentLedger + REBUILD_BATCH_SIZE - 1, endLedger);
+
+      try {
+        const rawEvents = await this.rpc.getContractEvents({
+          startLedger: currentLedger,
+          filters: [{ type: "contract", contractIds: [contractId] }],
+          pagination: { limit: REBUILD_BATCH_SIZE },
+        });
+
+        const inRange = rawEvents.filter((e) => e.ledger <= batchEnd);
+        const normalized = inRange.map((e) => EventNormalizer.normalize(e));
+
+        console.log(
+          `[snapshot-service] rebuildFromRpc batch ledgers ${currentLedger}-${batchEnd}: ${normalized.length} events`,
+        );
+
+        if (normalized.length > 0) {
+          const result = await this.processEvents(normalized);
+          totalSignersUpdated += result.signersUpdated;
+          totalRolesUpdated += result.rolesUpdated;
+          totalEventsProcessed += result.eventsProcessed;
+          lastProcessedLedger = Math.max(lastProcessedLedger, result.lastProcessedLedger);
+          if (!result.success && result.error) {
+            errors.push(result.error);
+          }
+        }
+      } catch (error) {
+        const msg = String(error);
+        console.error(`[snapshot-service] rebuildFromRpc error at ledger ${currentLedger}:`, error);
+        errors.push(msg);
+      }
+
+      currentLedger = batchEnd + 1;
+    }
+
+    return {
+      success: errors.length === 0,
+      signersUpdated: totalSignersUpdated,
+      rolesUpdated: totalRolesUpdated,
+      eventsProcessed: totalEventsProcessed,
+      lastProcessedLedger,
+      error: errors.length > 0 ? errors.join("; ") : undefined,
+    };
   }
 
   /**
