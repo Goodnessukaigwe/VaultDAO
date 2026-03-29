@@ -12,8 +12,20 @@ export function createSnapshotControllers(service: SnapshotService) {
   };
 
   const getSigners: RequestHandler = async (req, res) => {
-    const signers = await service.getSigners(req.params.contractId as string);
+    const contractId = req.params.contractId as string;
+    const isActive = req.query.active === "true" ? true : req.query.active === "false" ? false : undefined;
+    
+    const signers = await service.getSigners(contractId, { isActive });
     success(res, signers);
+  };
+
+  const getSigner: RequestHandler = async (req, res) => {
+    const { contractId, address } = req.params;
+    const signer = await service.getSigner(contractId, address);
+    if (!signer) {
+      return error(res, { message: "Signer not found", status: 404 });
+    }
+    success(res, signer);
   };
 
   const getRoles: RequestHandler = async (req, res) => {
@@ -28,5 +40,5 @@ export function createSnapshotControllers(service: SnapshotService) {
     success(res, stats);
   };
 
-  return { getSnapshot, getSigners, getRoles, getStats };
+  return { getSnapshot, getSigners, getSigner, getRoles, getStats };
 }

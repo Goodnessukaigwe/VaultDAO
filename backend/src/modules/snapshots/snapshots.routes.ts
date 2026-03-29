@@ -8,6 +8,7 @@ export function createSnapshotRouter(service: SnapshotService) {
 
   router.get("/:contractId", ctrl.getSnapshot);
   router.get("/:contractId/signers", ctrl.getSigners);
+  router.get("/:contractId/signers/:address", ctrl.getSigner);
   router.get("/:contractId/roles", ctrl.getRoles);
   router.get("/:contractId/stats", ctrl.getStats);
 
