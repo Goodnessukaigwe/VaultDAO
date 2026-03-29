@@ -61,9 +61,29 @@ export class LifecycleManager {
 
     // Handle uncaught exceptions
     process.on("uncaughtException", (err) => {
-      this.logger.error("uncaught exception", { error: err.message });
+      this.logger.error("uncaught exception", {
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
       this.shutdown().catch((shutdownErr) => {
         this.logger.error("shutdown failed after exception", {
+          error:
+            shutdownErr instanceof Error
+              ? shutdownErr.message
+              : String(shutdownErr),
+        });
+        process.exit(1);
+      });
+    });
+
+    // Handle unhandled promise rejections
+    process.on("unhandledRejection", (reason) => {
+      this.logger.error("unhandled promise rejection", {
+        reason: reason instanceof Error ? reason.message : String(reason),
+        stack: reason instanceof Error ? reason.stack : undefined,
+      });
+      this.shutdown().catch((shutdownErr) => {
+        this.logger.error("shutdown failed after rejection", {
           error:
             shutdownErr instanceof Error
               ? shutdownErr.message
